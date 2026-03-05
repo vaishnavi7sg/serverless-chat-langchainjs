@@ -1,0 +1,473 @@
+# ==============================================================================
+# Workload Definition File (WDF) for Serverless Chat LangChain.js - Container Apps
+# ==============================================================================
+# This WDF deploys the Serverless Chat LangChain.js application to Azure Container Apps.
+# The application implements a serverless AI chat experience with
+# Retrieval-Augmented Generation (RAG) using LangChain.js, TypeScript, and Azure.
+# It uses Azure Cosmos DB for NoSQL as the vector database and Azure Blob Storage
+# for document storage.
+#
+# Source: https://github.com/vaishnavi7sg/serverless-chat-langchainjs
+#
+# The orchestrator will:
+# 1. Git Collector Minion: Clone the git repository (serverless-chat-langchainjs repo, branch: main)
+#    to NFS at /mnt/nfs/<org_id>/user-<user_id>/<version>/git_repos/clones/
+# 2. Secret Manager Minion: Extract secrets (Azure OpenAI keys, Cosmos DB connection string, etc.)
+#    from Azure Key Vault and place them in NFS at /mnt/nfs/<org_id>/user-<user_id>/<version>/env/
+# 3. Env Setup Minion: Generate Terraform scripts for Azure resources (if needed)
+#    and store them in NFS at /mnt/nfs/<org_id>/user-<user_id>/<version>/terraform/
+# 4. Deployment Minion: Build Docker images from the locally cloned repository
+#    (Backend API service using a generated Dockerfile)
+# 5. Deployment Minion: Push Docker images to Azure Container Registry (ACR)
+# 6. Deployment Minion: Deploy to Azure Container Apps (with automatic environment creation)
+# 7. Deployment Minion: Inject environment variables from NFS env directory
+# 8. Monitoring Minion: Verify application is live and functional
+#
+# Prerequisites:
+# - Azure Key Vault secrets must exist (azure-openai-endpoint, azure-openai-api-key,
+#   azure-cosmosdb-connection-string, etc.)
+# - Azure Container Registry (ACR) must exist (will be created if it doesn't)
+# - Azure Container Apps Environment will be created automatically if it doesn't exist
+# - Azure Key Vault and ACR credentials are configured in this WDF (secrets.azureKeyVault and acr sections)
+# - Azure credentials are configured in the TDF (credentials.azure section)
+# - Azure Cosmos DB for NoSQL must be provisioned with vector search capability
+# - Azure Blob Storage container must contain documents for RAG indexing
+#
+# Deployment Flow:
+# - Dockerfile missing? → FAIL EARLY
+# - Image build failed? → RETRY / SWITCH BUILD STRATEGY
+# - ACR exists? → CREATE
+# - App exists? → UPDATE (new revision)
+# - Health check fails? → ROLLBACK
+# ==============================================================================
+
+apiVersion: wdf.7sg.ai/v1
+kind: WorkloadDefinition
+version: "1.0.0"
+metadata:
+  name: serverless-chat-langchainjs-container-apps
+  tags:
+    env: production
+    app: serverless-chat-langchainjs
+    type: api-service
+    framework: langchainjs-azure-functions
+    llm: azure-openai
+    rag: azure-cosmos-db
+    platform: container-apps
+  org_id: "7sg-ai"
+  id: "serverless-chat-langchainjs-container-apps"
+  workload_id: "serverless-chat-langchainjs-container-apps"
+  version: "1.0.0"
+  description: "Serverless AI Chat with RAG using LangChain.js deployed to Azure Container Apps - uses Azure Cosmos DB for NoSQL as vector database and Azure OpenAI for embeddings and chat"
+  author: "vaishnavi7sg"
+  created_at: "2026-03-05T00:00:00Z"
+  updated_at: "2026-03-05T00:00:00Z"
+  status: "active"
+
+workload:
+  type: serverless-chat-langchainjs-api
+  repo: https://github.com/vaishnavi7sg/serverless-chat-langchainjs.git
+  branch: main
+  path: .  # Root of the repository
+
+  # Repository modifications - required changes to the cloned repository
+  modifications:
+    description: |
+      The serverless-chat-langchainjs application uses a monorepo structure with
+      packages/webapp (Lit web components) and packages/api (Azure Functions + LangChain.js).
+      The webapp must be built first to produce the static dist/ output, which is then
+      served alongside the API. For Container Apps deployment, we build a single container
+      that runs the API (Node.js) and serves the static frontend.
+    required_changes:
+      - type: pre_build
+        description: "Install all dependencies (monorepo root)"
+        command: "npm install"
+        working_dir: "."
+        required: true
+      - type: pre_build
+        description: "Build the webapp frontend - outputs static files to packages/webapp/dist/"
+        command: "cd packages/webapp && npm run build"
+        working_dir: "."
+        required: true
+
+  # Docker build configuration
+  build:
+    base_image: node:20-slim
+    context: ./
+    dockerfile: Dockerfile
+
+    optimization:
+      multi_stage: true
+      use_buildkit: true
+      cache_mounts:
+        - type: cache
+          target: /root/.npm
+          id: npm-cache
+        - type: cache
+          target: /app/.cache
+          id: app-cache
+
+    build_args:
+      NODE_VERSION: "20"
+      BUILD_VERSION: "latest"
+
+    ports:
+      - 8000  # API port
+
+    steps:
+      system_dependencies:
+        - curl
+        - wget
+      install_dependencies: true  # Runs 'npm install'
+      build: true  # Runs 'npm run build' for webapp
+      command:
+        - node packages/api/dist/src/functions/index.js
+        - npx func start --port 8000
+
+  # Deployment configuration - Azure Container Apps
+  deploy:
+    azure_container_apps:
+      backend_service:
+        name: serverless-chat-langchainjs-app
+        image: serverlesschatacr.azurecr.io/serverless-chat-langchainjs-app:latest
+        dockerfile: ./Dockerfile
+        environment: serverless-chat-langchainjs-aca-env
+        identity:
+        resources:
+          cpu: "1.0"
+          memory: "2Gi"
+        ingress:
+          enabled: true
+          external: true
+          target_port: 8000
+          transport: auto
+          allow_insecure: false
+        scale:
+          min_replicas: 1
+          max_replicas: 10
+
+  runtime:
+    platform: azure_container_apps
+    regions:
+      - eastus2
+
+    container_apps_environment:
+      name: serverless-chat-langchainjs-aca-env
+      resource_group: rg-serverless-chat-langchainjs
+      location: eastus2
+      log_analytics_workspace: null
+      workload_profile: Consumption
+      network:
+        infrastructure_subnet_id: null
+        docker_bridge_cidr: null
+        platform_reserved_cidr: null
+        platform_reserved_dns_ip: null
+
+    image:
+      repository: serverless-chat-langchainjs-app
+      tag: latest
+      tagging:
+        strategy: deployment_id
+        include_latest: true
+
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "2Gi"
+        ephemeral_storage: "5Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+        ephemeral_storage: "10Gi"
+
+    health:
+      liveness:
+        path: /health
+        port: 8000
+        scheme: HTTP
+        initial_delay_seconds: 30
+        period_seconds: 30
+        timeout_seconds: 10
+        failure_threshold: 3
+        success_threshold: 1
+      readiness:
+        path: /health
+        port: 8000
+        scheme: HTTP
+        initial_delay_seconds: 15
+        period_seconds: 10
+        timeout_seconds: 5
+        failure_threshold: 3
+        success_threshold: 1
+      startup:
+        path: /health
+        port: 8000
+        scheme: HTTP
+        initial_delay_seconds: 0
+        period_seconds: 10
+        timeout_seconds: 5
+        failure_threshold: 30
+        success_threshold: 1
+
+    env:
+      - name: NODE_ENV
+        value: production
+      - name: LOG_LEVEL
+        value: "INFO"
+      - name: PORT
+        value: "8000"
+      - name: API_HOST
+        value: "0.0.0.0"
+      - name: API_TITLE
+        value: "Serverless Chat LangChain.js API"
+      - name: API_VERSION
+        value: "1.0.0"
+      - name: AZURE_OPENAI_API_VERSION
+        value: "2024-02-15-preview"
+      - name: TZ
+        value: "UTC"
+      - name: RUNNING_IN_PRODUCTION
+        value: "true"
+      # Azure OpenAI - values injected from Key Vault
+      - name: AZURE_OPENAI_API_ENDPOINT
+        value: ""
+      - name: AZURE_OPENAI_API_KEY
+        value: ""
+      - name: AZURE_OPENAI_API_DEPLOYMENT_NAME
+        value: ""
+      - name: AZURE_OPENAI_API_EMBEDDINGS_DEPLOYMENT_NAME
+        value: ""
+      - name: AZURE_OPENAI_API_MODEL
+        value: "gpt-4"
+      # Azure Cosmos DB for NoSQL (vector database)
+      - name: AZURE_COSMOSDB_CONNECTION_STRING
+        value: ""
+      - name: AZURE_COSMOSDB_DATABASE_NAME
+        value: ""
+      - name: AZURE_COSMOSDB_CONTAINER_NAME
+        value: ""
+      # Azure Blob Storage (document storage)
+      - name: AZURE_STORAGE_ACCOUNT_NAME
+        value: ""
+      - name: AZURE_STORAGE_ACCOUNT_KEY
+        value: ""
+      - name: AZURE_STORAGE_CONTAINER
+        value: ""
+
+    autoscaling:
+      enabled: true
+      min_replicas: 1
+      max_replicas: 10
+      target_cpu_utilization: 70
+      target_memory_utilization: 80
+
+    lifecycle:
+      pre_stop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 15"]
+
+# Secrets configuration - Azure Key Vault
+secrets:
+  provider: azureKeyVault
+  azureKeyVault:
+    vault_name: wdf-secret-manager
+    vault_url: https://wdf-secret-manager.vault.azure.net/
+    region: East US
+  secretRefs:
+    - name: azure-openai-endpoint
+      injectAs: env
+      envVar: AZURE_OPENAI_API_ENDPOINT
+    - name: azure-openai-api-key
+      injectAs: env
+      envVar: AZURE_OPENAI_API_KEY
+    - name: azure-openai-deployment-name
+      injectAs: env
+      envVar: AZURE_OPENAI_API_DEPLOYMENT_NAME
+    - name: azure-openai-embeddings-deployment-name
+      injectAs: env
+      envVar: AZURE_OPENAI_API_EMBEDDINGS_DEPLOYMENT_NAME
+    - name: azure-cosmosdb-connection-string
+      injectAs: env
+      envVar: AZURE_COSMOSDB_CONNECTION_STRING
+    - name: azure-cosmosdb-database-name
+      injectAs: env
+      envVar: AZURE_COSMOSDB_DATABASE_NAME
+    - name: azure-cosmosdb-container-name
+      injectAs: env
+      envVar: AZURE_COSMOSDB_CONTAINER_NAME
+    - name: azure-storage-account-name
+      injectAs: env
+      envVar: AZURE_STORAGE_ACCOUNT_NAME
+    - name: azure-storage-account-key
+      injectAs: env
+      envVar: AZURE_STORAGE_ACCOUNT_KEY
+    - name: azure-storage-container
+      injectAs: env
+      envVar: AZURE_STORAGE_CONTAINER
+    - name: application-insights-instrumentation-key
+      injectAs: env
+      envVar: APPLICATIONINSIGHTS_CONNECTION_STRING
+
+# Azure Container Registry (ACR) configuration
+acr:
+  registry: serverlesschatacr
+  registry_url: serverlesschatacr.azurecr.io
+  resource_group: rg-serverless-chat-langchainjs
+  sku: Basic
+
+# ==============================================================================
+# MONITORING AND OBSERVABILITY
+# ==============================================================================
+monitoring:
+  metrics:
+    enabled: true
+    path: /metrics
+    port: 8000
+  logging:
+    level: info
+    format: json
+    aggregation:
+      enabled: true
+      destination: cloud-logging
+  application_insights:
+    enabled: true
+    instrumentation_key_secret: application-insights-instrumentation-key
+
+# ==============================================================================
+# SECURITY CONFIGURATION
+# ==============================================================================
+security:
+  policies:
+    secretsInEnvAllowed: true
+    runAsNonRoot: true
+    readOnlyRootFilesystem: false
+    allowPrivilegeEscalation: false
+    network_policy:
+      enabled: true
+      ingress:
+        - from:
+          - namespaceSelector:
+              matchLabels:
+                name: monitoring
+          ports:
+          - protocol: TCP
+            port: 8000
+      egress:
+        - to:
+          - namespaceSelector:
+              matchLabels:
+                name: external-services
+          ports:
+          - protocol: TCP
+            port: 443
+        - to:
+          - namespaceSelector:
+              matchLabels:
+                name: azure-services
+          ports:
+          - protocol: TCP
+            port: 443
+
+# ==============================================================================
+# DEPENDENCIES AND PREREQUISITES
+# ==============================================================================
+dependencies:
+  services:
+    - name: azure-openai-service
+      type: external
+      required: true
+      description: "Azure OpenAI service with chat completion model (e.g., gpt-4) and embedding model for vector search via LangChain.js"
+    - name: azure-cosmos-db-nosql
+      type: external
+      required: true
+      description: "Azure Cosmos DB for NoSQL used as the vector database for storing document embeddings and chat session history"
+    - name: azure-blob-storage
+      type: external
+      required: true
+      description: "Azure Blob Storage for storing source PDF documents used for RAG indexing"
+    - name: azure-container-apps
+      type: external
+      required: true
+      description: "Azure Container Apps for hosting the containerized application. Consumption plan with 1 CPU core, 2.0 GB RAM."
+    - name: azure-monitor
+      type: external
+      required: false
+      description: "Azure Monitor for application insights and logging. Pay-as-you-go tier."
+  infrastructure:
+    - name: azure-container-registry
+      type: container-registry
+      required: true
+      description: "Azure Container Registry for storing Docker images"
+  data:
+    - name: cosmos-db-vector-store
+      type: vector-database
+      required: true
+      description: "Azure Cosmos DB for NoSQL container with vector indexing policy for storing document embeddings generated by LangChain.js"
+      location:
+        type: azure-cosmos-db
+        database_name: serverless-chat-langchainjs-db
+    - name: document-storage
+      type: blob-storage
+      required: true
+      description: "Azure Blob Storage container containing source PDF documents (terms of service, privacy policy, support guide) for RAG ingestion"
+      location:
+        type: azure-blob-storage
+        container: documents
+
+# ==============================================================================
+# ROLLBACK CONFIGURATION
+# ==============================================================================
+rollback:
+  enabled: true
+  automatic: true
+  triggers:
+    - health_check_failure
+    - performance_degradation
+    - error_rate_threshold
+    - manual_trigger
+  strategy:
+    type: immediate
+    keep_previous_replicas: 1
+
+# ==============================================================================
+# PRE-DEPLOYMENT HOOKS
+# ==============================================================================
+hooks:
+  pre_deploy:
+    azure_openai_models:
+      resource_group: "rg-serverless-chat-langchainjs"
+      deployments:
+        - name: gpt-4
+          model: gpt-4
+          sku: Standard
+          capacity: 1
+          description: "GPT-4 model for chat completions via LangChain.js"
+        - name: text-embedding-ada-002
+          model: text-embedding-ada-002
+          sku: Standard
+          capacity: 30
+          description: "Embedding model for generating document vectors stored in Cosmos DB"
+
+# ==============================================================================
+# NOTES
+# ==============================================================================
+# This WDF is specifically configured for Azure Container Apps deployment.
+# The original application uses Azure Static Web Apps + Azure Functions (serverless),
+# but this WDF containerizes it for Container Apps deployment.
+#
+# Architecture:
+# - packages/webapp: Lit web component chat UI (built to static files)
+# - packages/api: Azure Functions API using LangChain.js for RAG
+# - Azure Cosmos DB for NoSQL: Vector database for document embeddings + chat history
+# - Azure Blob Storage: Source document storage
+#
+# The deployment minion will:
+# 1. Check for Dockerfile (fail early if missing)
+# 2. Build Docker image (with retry/switch strategy)
+# 3. Ensure ACR exists (create if needed)
+# 4. Check if Container App exists (update with new revision if exists)
+# 5. Perform health check (rollback if fails)
+#
+# The deployment supports both imperative (az CLI) and declarative (Terraform/Bicep) paths.
+# Since the repository contains Bicep files in infra/, declarative path may be used.
+# Otherwise, imperative path (az containerapp create/update) will be used.
