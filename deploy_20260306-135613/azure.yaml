@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: serverless-chat-langchainjs
+metadata:
+  template: serverless-chat-langchainjs@1.0.0
+
+services:
+  webapp:
+    project: ./packages/webapp
+    dist: dist
+    language: ts
+    host: staticwebapp
+    hooks:
+      predeploy:
+        run: npm run build
+
+  api:
+    project: ./packages/api
+    language: ts
+    host: function
+
+hooks:
+  postprovision:
+    run: azd env get-values > packages/api/.env
+  postup:
+    windows:
+      shell: pwsh
+      run: node scripts/upload-documents.js "$env:UPLOAD_URL"
+    posix:
+      shell: sh
+      run: node scripts/upload-documents.js "$UPLOAD_URL"

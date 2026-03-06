@@ -1,0 +1,344 @@
+apiVersion: wdf.7sg.ai/v2
+kind: WorkloadDefinition
+metadata:
+  name: serverless-chat-langchainjs-scenarios
+  description: LangChain.js + Azure Functions serverless chat app with two scenarios -
+    native (gpt-4.1-mini) and alternate (gpt-4.1-nano) on Azure Container Apps.
+  tags:
+    env: prod
+security:
+  network:
+    defaultExposure: private
+  identity:
+    workloadIdentity: true
+secrets:
+  provider: azureKeyVault
+  secretRefs:
+  - name: azure-openai-endpoint
+    injectAs: env
+    envVar: AZURE_OPENAI_API_ENDPOINT
+    externalRef:
+      provider: azure-keyvault
+      key: azure-openai-endpoint
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-openai-api-key
+    injectAs: env
+    envVar: AZURE_OPENAI_API_KEY
+    externalRef:
+      provider: azure-keyvault
+      key: azure-openai-api-key
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-cosmosdb-connection-string
+    injectAs: env
+    envVar: AZURE_COSMOSDB_CONNECTION_STRING
+    externalRef:
+      provider: azure-keyvault
+      key: azure-cosmosdb-connection-string
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-cosmosdb-database-name
+    injectAs: env
+    envVar: AZURE_COSMOSDB_DATABASE_NAME
+    externalRef:
+      provider: azure-keyvault
+      key: azure-cosmosdb-database-name
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-cosmosdb-container-name
+    injectAs: env
+    envVar: AZURE_COSMOSDB_CONTAINER_NAME
+    externalRef:
+      provider: azure-keyvault
+      key: azure-cosmosdb-container-name
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-storage-account-name
+    injectAs: env
+    envVar: AZURE_STORAGE_ACCOUNT_NAME
+    externalRef:
+      provider: azure-keyvault
+      key: azure-storage-account-name
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-storage-account-key
+    injectAs: env
+    envVar: AZURE_STORAGE_ACCOUNT_KEY
+    externalRef:
+      provider: azure-keyvault
+      key: azure-storage-account-key
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: azure-storage-container
+    injectAs: env
+    envVar: AZURE_STORAGE_CONTAINER
+    externalRef:
+      provider: azure-keyvault
+      key: azure-storage-container
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: langfuse-secret-key
+    injectAs: env
+    envVar: LANGFUSE_SECRET_KEY
+    externalRef:
+      provider: azure-keyvault
+      key: langfuse-secret-key
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: langfuse-public-key
+    injectAs: env
+    envVar: LANGFUSE_PUBLIC_KEY
+    externalRef:
+      provider: azure-keyvault
+      key: langfuse-public-key
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+  - name: langfuse-host
+    injectAs: env
+    envVar: LANGFUSE_HOST
+    externalRef:
+      provider: azure-keyvault
+      key: langfuse-host
+      vaultUrl: https://wdf-secret-manager.vault.azure.net/
+dataSources:
+  inputs:
+  - name: llm-endpoint
+    dsdfRef: dsdf/llm-endpoint.dsdf.yaml
+  outputs: []
+scenarios:
+  native:
+    description: 'Azure Container Apps with gpt-4.1-mini: standard deployment using
+      Azure OpenAI for RAG-powered serverless chat with LangChain.js and Cosmos DB
+      vector search.'
+    topology:
+      components:
+      - &api
+        name: serverless-chat-api
+        role: api
+        runtime:
+          platform: container-apps
+          regions:
+          - eastus2
+          image:
+            registry: serverlesschatacr.azurecr.io
+            repository: serverless-chat-api
+            tag: latest
+          env:
+          - name: API_HOST
+            value: 0.0.0.0
+          - name: PORT
+            value: '8000'
+          - name: LOG_LEVEL
+            value: INFO
+          - name: NODE_ENV
+            value: production
+          - name: AZURE_OPENAI_API_DEPLOYMENT_NAME
+            value: gpt-4.1-mini
+          - name: AZURE_OPENAI_API_EMBEDDINGS_DEPLOYMENT_NAME
+            value: text-embedding-ada-002
+          - name: AZURE_OPENAI_API_VERSION
+            value: 2024-02-15-preview
+          envFromSecretRefs:
+          - azure-openai-endpoint
+          - azure-openai-api-key
+          - azure-cosmosdb-connection-string
+          - azure-cosmosdb-database-name
+          - azure-cosmosdb-container-name
+          - azure-storage-account-name
+          - azure-storage-account-key
+          - azure-storage-container
+          - langfuse-secret-key
+          - langfuse-public-key
+          - langfuse-host
+          resources:
+            cpu: '1'
+            memory: 2Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 5
+            policy:
+              metric: cpu
+              target: 70
+        endpoints:
+        - name: http
+          port: 8000
+          exposure: internal
+          protocol: http
+          path: /
+      - &ui
+        name: serverless-chat-webapp
+        role: ui
+        runtime:
+          platform: container-apps
+          regions:
+          - eastus2
+          image:
+            registry: serverlesschatacr.azurecr.io
+            repository: serverless-chat-webapp
+            tag: latest
+          env:
+          - name: API_URL
+            value: http://serverless-chat-api:8000
+          - name: PORT
+            value: '8000'
+          envFromSecretRefs: []
+          resources:
+            cpu: '0.5'
+            memory: 1Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 3
+            policy:
+              metric: cpu
+              target: 70
+        endpoints:
+        - name: http
+          port: 8000
+          exposure: public
+          protocol: http
+          path: /
+        dependsOn:
+        - serverless-chat-api
+    deployments:
+    - name: azure-container-apps-gpt4-1mini
+      target:
+        provider: azure
+        region: eastus2
+        tdfRef: azure-east
+        cluster: serverless-chat-langchainjs-aca-env
+        namespace: serverless-chat-langchainjs
+      identityRef: azure-managed-identity://serverless-chat-langchainjs
+      secretStores:
+        primary: wdf-secret-manager
+      components:
+      - serverless-chat-api
+      - serverless-chat-webapp
+      overrides:
+        components:
+          serverless-chat-api:
+            runtime:
+              image:
+                registry: serverlesschatacr.azurecr.io
+                repository: serverless-chat-api
+                tag: latest
+          serverless-chat-webapp:
+            runtime:
+              image:
+                registry: serverlesschatacr.azurecr.io
+                repository: serverless-chat-webapp
+                tag: latest
+  alternates:
+  - name: azure-container-apps-gpt-4-1-nano
+    description: 'Same Azure Container Apps setup but using gpt-4.1-nano model instead
+      of gpt-4.1-mini. Uses the same Key Vault and infrastructure.'
+    topology:
+      components:
+      - name: serverless-chat-api
+        role: api
+        runtime:
+          platform: container-apps
+          regions:
+          - eastus2
+          image:
+            registry: serverlesschatacr.azurecr.io
+            repository: serverless-chat-api
+            tag: latest
+          env:
+          - name: API_HOST
+            value: 0.0.0.0
+          - name: PORT
+            value: '8000'
+          - name: LOG_LEVEL
+            value: INFO
+          - name: NODE_ENV
+            value: production
+          - name: AZURE_OPENAI_API_DEPLOYMENT_NAME
+            value: gpt-4.1-nano
+          - name: AZURE_OPENAI_API_EMBEDDINGS_DEPLOYMENT_NAME
+            value: text-embedding-ada-002
+          - name: AZURE_OPENAI_API_VERSION
+            value: 2024-12-01-preview
+          envFromSecretRefs:
+          - azure-openai-endpoint
+          - azure-openai-api-key
+          - azure-cosmosdb-connection-string
+          - azure-cosmosdb-database-name
+          - azure-cosmosdb-container-name
+          - azure-storage-account-name
+          - azure-storage-account-key
+          - azure-storage-container
+          - langfuse-secret-key
+          - langfuse-public-key
+          - langfuse-host
+          resources:
+            cpu: '1'
+            memory: 2Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 5
+            policy:
+              metric: cpu
+              target: 70
+        endpoints:
+        - name: http
+          port: 8000
+          exposure: internal
+          protocol: http
+          path: /
+      - name: serverless-chat-webapp
+        role: ui
+        runtime:
+          platform: container-apps
+          regions:
+          - eastus2
+          image:
+            registry: serverlesschatacr.azurecr.io
+            repository: serverless-chat-webapp
+            tag: latest
+          env:
+          - name: API_URL
+            value: http://serverless-chat-api:8000
+          - name: PORT
+            value: '8000'
+          envFromSecretRefs: []
+          resources:
+            cpu: '0.5'
+            memory: 1Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 3
+            policy:
+              metric: cpu
+              target: 70
+        endpoints:
+        - name: http
+          port: 8000
+          exposure: public
+          protocol: http
+          path: /
+        dependsOn:
+        - serverless-chat-api
+    deployments:
+    - name: azure-container-apps-gpt4-1nano
+      target:
+        provider: azure
+        region: eastus2
+        tdfRef: azure-east-sc-alt
+        cluster: serverless-chat-langchainjs-aca-env
+        namespace: serverless-chat-langchainjs
+      identityRef: azure-managed-identity://serverless-chat-langchainjs
+      secretStores:
+        primary: wdf-secret-manager
+      components:
+      - serverless-chat-api
+      - serverless-chat-webapp
+      overrides:
+        components:
+          serverless-chat-api:
+            runtime:
+              image:
+                registry: serverlesschatacr.azurecr.io
+                repository: serverless-chat-api
+                tag: latest
+              env:
+              - name: AZURE_OPENAI_API_DEPLOYMENT_NAME
+                value: gpt-4.1-nano
+              - name: AZURE_OPENAI_API_VERSION
+                value: 2024-12-01-preview
+          serverless-chat-webapp:
+            runtime:
+              image:
+                registry: serverlesschatacr.azurecr.io
+                repository: serverless-chat-webapp
+                tag: latest
